@@ -38,6 +38,7 @@ import re
 import sys
 import threading
 import time
+import json
 
 from rtemstoolkit import configuration
 from rtemstoolkit import error
@@ -227,6 +228,7 @@ def run(args, command_path = None):
         optargs = { '--rtems-tools':    'The path to the RTEMS tools',
                     '--rtems-bsp':      'The RTEMS BSP to run the test on',
                     '--user-config':    'Path to your local user configuration INI file',
+                    '--json-log':       'Path to JSON test output file',
                     '--report-mode':    'Reporting modes, failures (default),all,none',
                     '--list-bsps':      'List the supported BSPs',
                     '--debug-trace':    'Debug trace based on specific flags (console,gdb,output,cov)',
@@ -251,6 +253,17 @@ def run(args, command_path = None):
             else:
                 to_addr = 'build@rtems.org'
             output = log_capture()
+        json_log = None
+        json_file = opts.find_arg('--json-log')
+        if json_file is not None:
+            if len(json_file) != 2:
+                raise error.general('invalid RTEMS JSON log option')
+            json_file = json_file[1]
+            json_log = {}
+            json_log['Command Line'] = " ".join(args)
+            json_log['Python'] = sys.version.replace('\n', '')
+            json_log['test_groups'] = []
+            json_log['Host'] = host.label(mode = 'all')
         log.notice('RTEMS Testing - Tester, %s' % (version.string()))
         if opts.find_arg('--list-bsps'):
             bsps.list(opts)
@@ -360,6 +373,59 @@ def run(args, command_path = None):
         total_time = 'Testing time     : %s' % (str(end_time - start_time))
         log.notice(average_time)
         log.notice(total_time)
+        if json_log is not None:
+            json_log['summary'] = {}
+            json_log['summary']['passed_count'] = reports.passed
+            json_log['summary']['failed_count'] = reports.failed
+            json_log['summary']['user-input_count'] = reports.user_input
+            json_log['summary']['expected-fail_count'] = reports.expected_fail
+            json_log['summary']['indeterminate_count'] = reports.indeterminate
+            json_log['summary']['benchmark_count'] = reports.benchmark
+            json_log['summary']['timeout_count'] = reports.timeouts
+            json_log['summary']['invalid_count'] = reports.invalids
+            json_log['summary']['wrong-version_count'] = reports.wrong_version
+            json_log['summary']['wrong-build_count'] = reports.wrong_build
+            json_log['summary']['wrong-tools_count'] = reports.wrong_tools
+            json_log['summary']['total_count'] = reports.total
+            json_log['summary']['average_test_time'] = str((end_time - start_time) / total)
+            json_log['summary']['testing_time'] = str(end_time - start_time)
+
+            result_types = ['failed', 'user-input', 'expected-fail', 'indeterminate', 'benchmark', 'timeout', 'invalid', 'wrong-version', 'wrong-build', 'wrong-tools']
+            json_results = {}
+            for result_type in result_types:
+                json_log['summary'][result_type] = []
+
+            # collate results for JSON log
+            for name in reports.results:
+                result_type = reports.results[name]['result']
+                test_parts = name.split("/")
+                test_category = test_parts[-2]
+                test_name = test_parts[-1]
+                if result_type != 'passed':
+                    json_log['summary'][result_type].append(test_name)
+                if test_category not in json_results:
+                    json_results[test_category] = []
+                json_result = {}
+                # remove the file extension
+                json_result["name"] = test_name.split('.')[0]
+                json_result["result"] = result_type
+                if result_type == "failed" or result_type == "timeout":
+                    json_result["output"] = reports.results[name]["output"]
+                json_results[test_category].append(json_result)
+
+            # convert results to a better format for report generation
+            sorted_keys = sorted(json_results.keys())
+            for i in range(len(sorted_keys)):
+                results_log = {}
+                results_log["index"] = i + 1
+                results_log["name"] = sorted_keys[i]
+                results_log["results"] = json_results[sorted_keys[i]]
+                json_log["test_groups"].append(results_log)
+
+            # write out JSON log
+            with open(json_file, 'w') as outfile:
+                json.dump(json_log, outfile, sort_keys=True, indent=4)
+
         if mail is not None and output is not None:
             m_arch = opts.defaults.expand('%{arch}')
             m_bsp = opts.defaults.expand('%{bsp}')
